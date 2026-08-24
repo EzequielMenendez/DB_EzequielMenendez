@@ -1,0 +1,12 @@
+backups/
+*.backup
+*.dump
+*.sql~
+*.tmp
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

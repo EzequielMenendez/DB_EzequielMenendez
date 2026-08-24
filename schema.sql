@@ -1,75 +1,69 @@
--- Borrado de tablas para crear desde cero
-DROP TABLE IF EXISTS linea_pedido;
-DROP TABLE IF EXISTS pedido;
-DROP TABLE IF EXISTS producto;
-DROP TABLE IF EXISTS cliente;
-DROP TABLE IF EXISTS categoria;
-DROP TYPE IF EXISTS forma_pago;
+-- Santiago Barretto 2PRO3 2026
+-- Food Store
 
--- Formas de pago
-CREATE TYPE forma_pago AS ENUM ('EFECTIVO', 'TARJETA', 'TRANSFERENCIA');
-
--- Tabla categoria
-CREATE TABLE categoria (
-    id          BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    nombre      VARCHAR(80)   NOT NULL UNIQUE,
-    descripcion VARCHAR(255),
-    activo      BOOLEAN       NOT NULL DEFAULT TRUE,
-    created_at  TIMESTAMPTZ   NOT NULL DEFAULT now()
+CREATE TYPE forma_pago_enum AS ENUM (
+    'EFECTIVO',
+    'TARJETA',
+    'TRANSFERENCIA'
 );
 
--- Tabla producto
-CREATE TABLE producto (
-    id           BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    nombre       VARCHAR(120)  NOT NULL,
-    descripcion  VARCHAR(255),
-    precio       NUMERIC(10,2) NOT NULL CHECK (precio >= 0),
-    stock        INTEGER       NOT NULL DEFAULT 0 CHECK (stock >= 0),
-    activo       BOOLEAN       NOT NULL DEFAULT TRUE,
-    -- ON DELETE RESTRICT: Regla R7 (no eliminar físicamente productos ni categorías dados de baja para preservar el historial).
-    categoria_id BIGINT        NOT NULL REFERENCES categoria (id) ON DELETE RESTRICT,
-    created_at   TIMESTAMPTZ   NOT NULL DEFAULT now()
-);
-
--- Tabla cliente
 CREATE TABLE cliente (
-    id         BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    nombre     VARCHAR(80)   NOT NULL,
-    apellido   VARCHAR(80)   NOT NULL,
-    email      VARCHAR(160)  NOT NULL UNIQUE,
-    telefono   VARCHAR(30),
-    direccion  VARCHAR(255),
-    activo     BOOLEAN       NOT NULL DEFAULT TRUE,
-    created_at TIMESTAMPTZ   NOT NULL DEFAULT now()
+    id_cliente BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    nombre VARCHAR(100) NOT NULL,
+    apellido VARCHAR(100) NOT NULL,
+    email VARCHAR(254) NOT NULL UNIQUE,
+    telefono VARCHAR(30)
 );
 
--- Tabla pedido
+CREATE TABLE categoria (
+    id_categoria BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    nombre VARCHAR(100) NOT NULL,
+    descripcion VARCHAR(500),
+    activo BOOLEAN NOT NULL DEFAULT TRUE
+);
+
+CREATE TABLE producto (
+    id_producto BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    nombre VARCHAR(150) NOT NULL,
+    descripcion VARCHAR(500),
+    precio_lista NUMERIC(12,2) NOT NULL,
+    stock INTEGER NOT NULL DEFAULT 0,
+    activo BOOLEAN NOT NULL DEFAULT TRUE,
+    id_categoria BIGINT NOT NULL,
+    CONSTRAINT fk_producto_categoria
+        FOREIGN KEY (id_categoria)
+        REFERENCES categoria(id_categoria)
+        ON DELETE RESTRICT,
+    CONSTRAINT ck_producto_precio_no_negativo
+        CHECK (precio_lista >= 0),
+    CONSTRAINT ck_producto_stock_no_negativo
+        CHECK (stock >= 0)
+);
+
 CREATE TABLE pedido (
-    id         BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    fecha_hora TIMESTAMPTZ NOT NULL DEFAULT now(),
-    forma_pago forma_pago  NOT NULL DEFAULT 'EFECTIVO',
-    -- ON DELETE RESTRICT: Evita eliminar clientes que tienen pedidos asociados (integridad histórica).
-    cliente_id BIGINT      NOT NULL REFERENCES cliente (id) ON DELETE RESTRICT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    id_pedido BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    fecha TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    id_cliente BIGINT NOT NULL,
+    forma_pago forma_pago_enum NOT NULL,
+    CONSTRAINT fk_pedido_cliente
+        FOREIGN KEY (id_cliente)
+        REFERENCES cliente(id_cliente)
+        ON DELETE RESTRICT
 );
 
--- Tabla Linea pedido que funciona como intermedia con pedido y producto
-CREATE TABLE linea_pedido (
-    -- ON DELETE CASCADE: Si se elimina el pedido, se eliminan sus líneas de detalle asociadas.
-    pedido_id       BIGINT        NOT NULL REFERENCES pedido (id)   ON DELETE CASCADE,
-    -- ON DELETE RESTRICT: Evita eliminar productos que forman parte de pedidos históricos/facturados.
-    producto_id     BIGINT        NOT NULL REFERENCES producto (id) ON DELETE RESTRICT,
-    cantidad        INTEGER       NOT NULL CHECK (cantidad > 0),
-    precio_unitario NUMERIC(10,2) NOT NULL CHECK (precio_unitario >= 0),
-    PRIMARY KEY (pedido_id, producto_id)
+CREATE TABLE detalle_pedido (
+    id_pedido BIGINT NOT NULL,
+    id_producto BIGINT NOT NULL,
+    cantidad INTEGER NOT NULL,
+    precio_unitario NUMERIC(12,2) NOT NULL,
+    CONSTRAINT pk_detalle_pedido PRIMARY KEY (id_pedido, id_producto),
+    CONSTRAINT fk_detalle_pedido_pedido
+        FOREIGN KEY (id_pedido) REFERENCES pedido(id_pedido) ON DELETE RESTRICT,
+    CONSTRAINT fk_detalle_pedido_producto
+        FOREIGN KEY (id_producto) REFERENCES producto(id_producto) ON DELETE RESTRICT,
+    CONSTRAINT ck_detalle_cantidad_positiva CHECK (cantidad > 0),
+    CONSTRAINT ck_detalle_precio_no_negativo CHECK (precio_unitario >= 0)
 );
 
--- Creación de indices
--- mostrar todos los pedidos de un cliente.
-CREATE INDEX idx_pedido_cliente ON pedido (cliente_id);
-
--- listar productos vigentes de una categoria.
-CREATE INDEX idx_producto_categoria ON producto (categoria_id) WHERE activo;
-
--- cuanto se vendio de cada producto.
-CREATE INDEX idx_linea_producto ON linea_pedido (producto_id);
+CREATE INDEX idx_pedido_cliente_fecha ON pedido (id_cliente, fecha DESC);
+CREATE INDEX idx_producto_categoria_activo ON producto (id_categoria, activo);

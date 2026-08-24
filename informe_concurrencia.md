@@ -1,143 +1,161 @@
-# Informe de Concurrencia y Niveles de Aislamiento — Food Store (Parte 2)
+# Informe de concurrencia
 
-Este informe documenta la reproducción, explicación y verificación en el motor real de PostgreSQL de tres escenarios de concurrencia sobre las tablas del proyecto **Food Store**, utilizando dos sesiones concurrentes (Sesión A y Sesión B).
+Base de trabajo: `food_store_tp2`. Script de apoyo: `sql/03_laboratorio_concurrencia.sql`. Antes de abrir los escenarios, verificar la conexion conforme a `protocolo_seguridad.md` y definir el mismo marcador unico en ambas sesiones. Reemplazar `LAB_CONC_2026_CAMBIAR` por un valor unico antes de ejecutar.
 
----
+```sql
+\set ON_ERROR_STOP on
+\set laboratorio_id 'LAB_CONC_2026_CAMBIAR'
+```
 
-## Escenario 1: Espera por bloqueo (Lock Wait con `FOR UPDATE`)
+## Preparacion (sesion A)
 
-### 1. Cuál de los cuatro se reprodujo
-Espera por bloqueo por contención de fila (`SELECT ... FOR UPDATE`).
+```sql
+BEGIN;
+DELETE FROM detalle_pedido WHERE id_producto IN (SELECT p.id_producto FROM producto p JOIN categoria c ON c.id_categoria = p.id_categoria WHERE c.descripcion = 'Semilla TP2: ' || :'laboratorio_id');
+DELETE FROM producto p USING categoria c WHERE p.id_categoria = c.id_categoria AND c.descripcion = 'Semilla TP2: ' || :'laboratorio_id';
+DELETE FROM categoria WHERE descripcion = 'Semilla TP2: ' || :'laboratorio_id';
+INSERT INTO categoria (nombre, descripcion) VALUES (:'laboratorio_id', 'Semilla TP2: ' || :'laboratorio_id');
+INSERT INTO producto (nombre, precio_lista, stock, activo, id_categoria) SELECT :'laboratorio_id' || '_PRECIO', 10.00, 10, TRUE, id_categoria FROM categoria WHERE descripcion = 'Semilla TP2: ' || :'laboratorio_id';
+INSERT INTO producto (nombre, precio_lista, stock, activo, id_categoria) SELECT :'laboratorio_id' || '_BLOQUEO', 15.00, 10, TRUE, id_categoria FROM categoria WHERE descripcion = 'Semilla TP2: ' || :'laboratorio_id';
+COMMIT;
+```
 
-### 2. Comandos exactos de Sesión A y Sesión B (en orden)
-1. **Sesión A:** Inicia transacción y bloquea un producto.
-   ```sql
-   BEGIN;
-   SELECT * FROM producto WHERE id = 1 FOR UPDATE;
-   ```
-2. **Sesión B:** Intenta bloquear el mismo producto.
-   ```sql
-   BEGIN;
-   SELECT * FROM producto WHERE id = 1 FOR UPDATE;
-   ```
-   *(La Sesión B queda colgada/esperando).*
-3. **Sesión A:** Libera el bloqueo.
-   ```sql
-   COMMIT;
-   ```
-   *(Inmediatamente después del COMMIT de A, la Sesión B recibe el resultado).*
-4. **Sesión B:** Finaliza su transacción.
-   ```sql
-   COMMIT;
-   ```
+## 1. Lectura no repetible
 
-### 3. Salida real de cada comando
-- **Sesión A:** `SELECT 1` (retorna el registro y adquiere un bloqueo exclusivo de fila).
-- **Sesión B:** Queda en espera (bloqueada) hasta que la Sesión A hace `COMMIT`. Una vez liberado, retorna el registro con éxito.
+**Objetivo.** Comparar dos lecturas de `producto.precio_lista` dentro de una transaccion mientras otra sesion actualiza la fila.
 
-### 4. Explicación de la IA (Herramienta: OpenCode / Gemini)
-> *"Cuando una transacción ejecuta `SELECT ... FOR UPDATE`, adquiere un bloqueo de exclusividad (RowShareLock / Exclusive Lock) sobre las filas seleccionadas. Cualquier otra transacción que intente modificar o bloquear mediante `FOR UPDATE` esas mismas filas se detendrá (quedará en cola de espera) hasta que la transacción propietaria del bloqueo libere los recursos mediante `COMMIT` o `ROLLBACK`."*
+**Orden de comandos.** Ejecutar primero en A el primer bloque y detenerse despues de su primer `SELECT`. Ejecutar B completo. Luego ejecutar en A las dos sentencias restantes. Repetir el mismo orden para `REPEATABLE READ`.
 
-### 5. Verificación en el motor
-Se repitió exactamente el experimento en el motor real de PostgreSQL 18. El comportamiento fue idéntico al predicho: la Sesión B pausó su ejecución en el segundo `SELECT` y continuó de forma automática y transparente tras el `COMMIT` de la Sesión A.
+Sesion A, `READ COMMITTED`:
 
-### 6. Conclusión
-La explicación de la IA se confirmó al 100%. El mecanismo subyacente que resuelve y gestiona este escenario es el **sistema de bloqueo a nivel de tupla (Row-level Locking)** integrado en el motor de almacenamiento de PostgreSQL.
+```sql
+BEGIN ISOLATION LEVEL READ COMMITTED;
+SELECT precio_lista FROM producto WHERE nombre = :'laboratorio_id' || '_PRECIO' AND id_categoria = (SELECT id_categoria FROM categoria WHERE descripcion = 'Semilla TP2: ' || :'laboratorio_id');
+SELECT precio_lista FROM producto WHERE nombre = :'laboratorio_id' || '_PRECIO' AND id_categoria = (SELECT id_categoria FROM categoria WHERE descripcion = 'Semilla TP2: ' || :'laboratorio_id');
+COMMIT;
+```
 
----
+Sesion B, entre los `SELECT` de A:
 
-## Escenario 2: Lectura no repetible (`READ COMMITTED` vs `REPEATABLE READ`)
+```sql
+BEGIN;
+UPDATE producto SET precio_lista = 20.00 WHERE nombre = :'laboratorio_id' || '_PRECIO' AND id_categoria = (SELECT id_categoria FROM categoria WHERE descripcion = 'Semilla TP2: ' || :'laboratorio_id');
+COMMIT;
+```
 
-### 1. Cuál de los cuatro se reprodujo
-Lectura no repetible (*Non-repeatable read*).
+Sesion A, `REPEATABLE READ`:
 
-### 2. Comandos exactos de Sesión A y Sesión B (en orden)
-1. **Sesión A (Nivel por defecto - Read Committed):** Inicia transacción y lee el precio de un producto.
-   ```sql
-   BEGIN;
-   SELECT precio FROM producto WHERE id = 1; -- Supongamos que retorna 1000.00
-   ```
-2. **Sesión B:** Modifica y commitea el precio del mismo producto.
-   ```sql
-   BEGIN;
-   UPDATE producto SET precio = 1200.00 WHERE id = 1;
-   COMMIT;
-   ```
-3. **Sesión A:** Vuelve a leer el precio del producto dentro de la **misma** transacción.
-   ```sql
-   SELECT precio FROM producto WHERE id = 1; -- Retorna 1200.00 (cambió)
-   COMMIT;
-   ```
+```sql
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+SELECT precio_lista FROM producto WHERE nombre = :'laboratorio_id' || '_PRECIO' AND id_categoria = (SELECT id_categoria FROM categoria WHERE descripcion = 'Semilla TP2: ' || :'laboratorio_id');
+SELECT precio_lista FROM producto WHERE nombre = :'laboratorio_id' || '_PRECIO' AND id_categoria = (SELECT id_categoria FROM categoria WHERE descripcion = 'Semilla TP2: ' || :'laboratorio_id');
+COMMIT;
+```
 
-*Prueba comparativa con `REPEATABLE READ`:*
-1. **Sesión A:** Inicia con nivel Repeatable Read.
-   ```sql
-   BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ;
-   SELECT precio FROM producto WHERE id = 1; -- Retorna 1200.00
-   ```
-2. **Sesión B:** Modifica el precio y commitea.
-   ```sql
-   UPDATE producto SET precio = 1500.00 WHERE id = 1; -- (Se ejecuta OK)
-   ```
-3. **Sesión A:** Vuelve a leer dentro de su transacción.
-   ```sql
-   SELECT precio FROM producto WHERE id = 1; -- Retorna 1200.00 (snapshot aislado)
-   COMMIT;
-   ```
+Sesion B, entre los `SELECT` de A:
 
-### 3. Salida real de cada comando
-- En `READ COMMITTED`, la segunda lectura de la Sesión A arrojó un valor diferente (1200.00).
-- En `REPEATABLE READ`, la segunda lectura de la Sesión A mantuvo exactamente el valor inicial (1200.00) a pesar de los cambios commiteados por B.
+```sql
+BEGIN;
+UPDATE producto SET precio_lista = 30.00 WHERE nombre = :'laboratorio_id' || '_PRECIO' AND id_categoria = (SELECT id_categoria FROM categoria WHERE descripcion = 'Semilla TP2: ' || :'laboratorio_id');
+COMMIT;
+```
 
-### 4. Explicación de la IA (Herramienta: OpenCode / Gemini)
-> *"Bajo el nivel de aislamiento `READ COMMITTED` (por defecto en PostgreSQL), cada consulta dentro de una transacción ve una instantánea (*snapshot*) tomada al inicio de esa sentencia individual, por lo que si otra transacción modifica y commitea datos entre consultas, la transacción actual verá los nuevos valores. En cambio, bajo `REPEATABLE READ`, la instantánea se toma al inicio de toda la transacción, garantizando que cualquier lectura repetida devuelva exactamente los mismos datos."*
+**Resultado esperado segun PostgreSQL.** En `READ COMMITTED`, cada sentencia ve una instantanea nueva y el segundo valor puede ser `20.00`. En `REPEATABLE READ`, ambas lecturas de A pertenecen a la instantanea inicial y deben conservar el mismo valor, aunque B confirme `30.00`.
 
-### 5. Verificación en el motor
-Se verificó en PostgreSQL. El motor efectivamente permitió la lectura no repetible en `READ COMMITTED` y la previno en `REPEATABLE READ` utilizando MVCC (*Multi-Version Concurrency Control*).
+**Observacion real del motor: PENDIENTE DE EJECUCION.** Registrar los dos valores leidos, mensajes de `BEGIN` y `COMMIT`, version del motor y capturas.
 
-### 6. Conclusión
-La explicación de la IA es totalmente correcta. El aislamiento `REPEATABLE READ` evita la lectura no repetible mediante el uso de vistas MVCC consistentes a nivel de transacción.
+## 2. Lectura fantasma
 
----
+**Objetivo.** Contar productos activos de la categoria de laboratorio mientras otra sesion inserta un nuevo producto activo.
 
-## Escenario 3: Interbloqueo real (Deadlock - Error 40P01)
+Sesion A, `READ COMMITTED`:
 
-### 1. Cuál de los cuatro se reprodujo
-Interbloqueo real (*Deadlock*).
+```sql
+BEGIN ISOLATION LEVEL READ COMMITTED;
+SELECT count(*) AS activos FROM producto WHERE activo AND id_categoria = (SELECT id_categoria FROM categoria WHERE descripcion = 'Semilla TP2: ' || :'laboratorio_id');
+SELECT count(*) AS activos FROM producto WHERE activo AND id_categoria = (SELECT id_categoria FROM categoria WHERE descripcion = 'Semilla TP2: ' || :'laboratorio_id');
+COMMIT;
+```
 
-### 2. Comandos exactos de Sesión A y Sesión B (en orden)
-1. **Sesión A:** Inicia transacción y bloquea el producto 1.
-   ```sql
-   BEGIN;
-   SELECT * FROM producto WHERE id = 1 FOR UPDATE;
-   ```
-2. **Sesión B:** Inicia transacción y bloquea el producto 2.
-   ```sql
-   BEGIN;
-   SELECT * FROM producto WHERE id = 2 FOR UPDATE;
-   ```
-3. **Sesión A:** Intenta bloquear el producto 2 (queda en espera).
-   ```sql
-   SELECT * FROM producto WHERE id = 2 FOR UPDATE;
-   ```
-4. **Sesión B:** Intenta bloquear el producto 1.
-   ```sql
-   SELECT * FROM producto WHERE id = 1 FOR UPDATE;
-   ```
-   *(En este preciso instante, PostgreSQL detecta el ciclo de espera circular).*
+Sesion B, entre los conteos de A:
 
-### 3. Salida real de cada comando
-- **Sesión B:** Recibe inmediatamente un error del motor:
-  `ERROR: deadlock detected`
-  `DETAIL: Process 1234 waits for ExclusiveLock on extension...`
-  `HINT: See server log for details.` (Abortando la transacción de B con rollback automático).
-- **Sesión A:** Continúa su ejecución con éxito tras recibir el bloqueo del producto 2 al abortarse B. Luego hace `COMMIT`.
+```sql
+BEGIN;
+INSERT INTO producto (nombre, precio_lista, stock, activo, id_categoria) SELECT :'laboratorio_id' || '_FANTASMA', 5.00, 1, TRUE, id_categoria FROM categoria WHERE descripcion = 'Semilla TP2: ' || :'laboratorio_id';
+COMMIT;
+```
 
-### 4. Explicación de la IA (Herramienta: OpenCode / Gemini)
-> *"Un interbloqueo ocurre cuando dos o más transacciones se bloquean mutuamente porque cada una posee un recurso que la otra necesita y ninguna puede avanzar. PostgreSQL cuenta con un detector de interbloqueos (*deadlock detector*) en segundo plano que identifica estas dependencias circulares y aborta automáticamente (*cancels*) una de las transacciones con el código de error `40P01`, permitiendo que la otra complete su trabajo."*
+Antes de repetir con `REPEATABLE READ`, sesion B ejecuta la limpieza exacta:
 
-### 5. Verificación en el motor
-Se probó en PostgreSQL obteniendo exactamente el código de error `40P01` y el aborto automático de la segunda sesión involucrada en el cruce de bloqueos.
+```sql
+BEGIN;
+DELETE FROM detalle_pedido WHERE id_producto IN (SELECT p.id_producto FROM producto p JOIN categoria c ON c.id_categoria = p.id_categoria WHERE p.nombre = :'laboratorio_id' || '_FANTASMA' AND c.descripcion = 'Semilla TP2: ' || :'laboratorio_id');
+DELETE FROM producto p USING categoria c WHERE p.id_categoria = c.id_categoria AND p.nombre = :'laboratorio_id' || '_FANTASMA' AND c.descripcion = 'Semilla TP2: ' || :'laboratorio_id';
+COMMIT;
+```
 
-### 6. Conclusión
-La explicación de la IA fue validada y confirmada por el motor. El interbloqueo se resuelve mediante la detección automática y el aborto de una transacción por parte del motor relacional.
+Sesion A, `REPEATABLE READ`:
+
+```sql
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+SELECT count(*) AS activos FROM producto WHERE activo AND id_categoria = (SELECT id_categoria FROM categoria WHERE descripcion = 'Semilla TP2: ' || :'laboratorio_id');
+SELECT count(*) AS activos FROM producto WHERE activo AND id_categoria = (SELECT id_categoria FROM categoria WHERE descripcion = 'Semilla TP2: ' || :'laboratorio_id');
+COMMIT;
+```
+
+Sesion B, entre los conteos de A:
+
+```sql
+BEGIN;
+INSERT INTO producto (nombre, precio_lista, stock, activo, id_categoria) SELECT :'laboratorio_id' || '_FANTASMA', 5.00, 1, TRUE, id_categoria FROM categoria WHERE descripcion = 'Semilla TP2: ' || :'laboratorio_id';
+COMMIT;
+```
+
+**Resultado esperado segun PostgreSQL.** En `READ COMMITTED`, el segundo conteo puede aumentar en uno. En `REPEATABLE READ`, el segundo conteo debe ser igual al primero porque A conserva su instantanea inicial; la fila insertada por B no es visible para esa transaccion.
+
+**Observacion real del motor: PENDIENTE DE EJECUCION.** Registrar ambos conteos por aislamiento y la confirmacion de cada insercion de B.
+
+## 3. Espera por bloqueo
+
+**Objetivo.** Evidenciar una espera de bloqueo de fila limitada a diez segundos.
+
+Sesion A, conservar la transaccion abierta despues del `SELECT` mientras se ejecuta B:
+
+```sql
+BEGIN;
+SET LOCAL lock_timeout = '10s';
+SELECT id_producto FROM producto WHERE nombre = :'laboratorio_id' || '_BLOQUEO' AND id_categoria = (SELECT id_categoria FROM categoria WHERE descripcion = 'Semilla TP2: ' || :'laboratorio_id') FOR UPDATE;
+COMMIT;
+```
+
+Sesion B, mientras A conserva el bloqueo:
+
+```sql
+BEGIN;
+SET LOCAL lock_timeout = '10s';
+SELECT id_producto FROM producto WHERE nombre = :'laboratorio_id' || '_BLOQUEO' AND id_categoria = (SELECT id_categoria FROM categoria WHERE descripcion = 'Semilla TP2: ' || :'laboratorio_id') FOR UPDATE;
+COMMIT;
+```
+
+**Resultado esperado segun PostgreSQL.** Si A libera la fila mediante `COMMIT` o `ROLLBACK` antes de diez segundos, B puede terminar el `SELECT` y confirmar. Si A no la libera, B recibe un error de `lock timeout`; este es un resultado de seguridad controlado. PostgreSQL cancela la sentencia y la transaccion de B queda abortada, por lo que B debe ejecutar `ROLLBACK;` antes de continuar.
+
+**Observacion real del motor: PENDIENTE DE EJECUCION.** Registrar hora de inicio de B, hora de liberacion o vencimiento, mensaje final de B y, si hubo `lock timeout`, el `ROLLBACK` ejecutado.
+
+## Limpieza final (sesion A)
+
+```sql
+BEGIN;
+DELETE FROM detalle_pedido WHERE id_producto IN (SELECT p.id_producto FROM producto p JOIN categoria c ON c.id_categoria = p.id_categoria WHERE c.descripcion = 'Semilla TP2: ' || :'laboratorio_id');
+DELETE FROM producto p USING categoria c WHERE p.id_categoria = c.id_categoria AND c.descripcion = 'Semilla TP2: ' || :'laboratorio_id';
+DELETE FROM categoria WHERE descripcion = 'Semilla TP2: ' || :'laboratorio_id';
+COMMIT;
+```
+
+## Checklist de evidencia real
+
+- [ ] Usar el mismo `laboratorio_id` unico en ambas sesiones.
+- [ ] Ejecutar preparacion y limpieza final en `food_store_tp2`.
+- [ ] Abrir dos sesiones `psql` independientes.
+- [ ] Reemplazar cada campo **PENDIENTE DE EJECUCION** por salidas o capturas reales.
+- [ ] Conservar comandos, version de PostgreSQL y nivel de aislamiento usado.
+- [ ] No presentar resultados esperados como resultados observados.
