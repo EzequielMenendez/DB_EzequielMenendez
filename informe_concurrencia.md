@@ -4,8 +4,10 @@ Base de trabajo: `food_store_tp2`. Script de apoyo: `sql/03_laboratorio_concurre
 
 ```sql
 \set ON_ERROR_STOP on
-\set laboratorio_id 'LAB_CONC_2026_CAMBIAR'
+\set laboratorio_id 'LAB_CONC_TEST'
 ```
+
+Version del motor: **PostgreSQL 18.6 on x86_64-windows, compiled by msvc-19.44.35228, 64-bit**.
 
 ## Preparacion (sesion A)
 
@@ -19,6 +21,8 @@ INSERT INTO producto (nombre, precio_lista, stock, activo, id_categoria) SELECT 
 INSERT INTO producto (nombre, precio_lista, stock, activo, id_categoria) SELECT :'laboratorio_id' || '_BLOQUEO', 15.00, 10, TRUE, id_categoria FROM categoria WHERE descripcion = 'Semilla TP2: ' || :'laboratorio_id';
 COMMIT;
 ```
+
+**Observacion real:** `BEGIN`, `DELETE 0` x3, `INSERT 0 1` x3, `COMMIT`. Semilla creada con 2 productos (`LAB_CONC_TEST_PRECIO` y `LAB_CONC_TEST_BLOQUEO`).
 
 ## 1. Lectura no repetible
 
@@ -43,6 +47,15 @@ UPDATE producto SET precio_lista = 20.00 WHERE nombre = :'laboratorio_id' || '_P
 COMMIT;
 ```
 
+**Observacion real del motor (READ COMMITTED):**
+
+| Momento    | precio_lista |
+|------------|-------------|
+| LECTURA_1  | 10.00       |
+| LECTURA_2  | 20.00       |
+
+La lectura no repetible se produjo: cada sentencia dentro de READ COMMITTED toma una nueva instantanea, por lo que la modificacion commiteada por B es visible en la segunda lectura de A.
+
 Sesion A, `REPEATABLE READ`:
 
 ```sql
@@ -60,9 +73,14 @@ UPDATE producto SET precio_lista = 30.00 WHERE nombre = :'laboratorio_id' || '_P
 COMMIT;
 ```
 
-**Resultado esperado segun PostgreSQL.** En `READ COMMITTED`, cada sentencia ve una instantanea nueva y el segundo valor puede ser `20.00`. En `REPEATABLE READ`, ambas lecturas de A pertenecen a la instantanea inicial y deben conservar el mismo valor, aunque B confirme `30.00`.
+**Observacion real del motor (REPEATABLE READ):**
 
-**Observacion real del motor: PENDIENTE DE EJECUCION.** Registrar los dos valores leidos, mensajes de `BEGIN` y `COMMIT`, version del motor y capturas.
+| Momento    | precio_lista |
+|------------|-------------|
+| LECTURA_1  | 10.00       |
+| LECTURA_2  | 10.00       |
+
+REPEATABLE READ conserva la instantanea inicial de toda la transaccion. La modificacion de B (`30.00`) no es visible para A, que conserva el valor `10.00` en ambas lecturas.
 
 ## 2. Lectura fantasma
 
@@ -84,6 +102,15 @@ BEGIN;
 INSERT INTO producto (nombre, precio_lista, stock, activo, id_categoria) SELECT :'laboratorio_id' || '_FANTASMA', 5.00, 1, TRUE, id_categoria FROM categoria WHERE descripcion = 'Semilla TP2: ' || :'laboratorio_id';
 COMMIT;
 ```
+
+**Observacion real del motor (READ COMMITTED):**
+
+| Momento  | activos |
+|----------|---------|
+| CONTEO_1 | 2       |
+| CONTEO_2 | 3       |
+
+La insercion de B es visible para A en la segunda lectura. READ COMMITTED permite lecturas fantasma porque cada sentencia ve una instantanea nueva.
 
 Antes de repetir con `REPEATABLE READ`, sesion B ejecuta la limpieza exacta:
 
@@ -111,9 +138,14 @@ INSERT INTO producto (nombre, precio_lista, stock, activo, id_categoria) SELECT 
 COMMIT;
 ```
 
-**Resultado esperado segun PostgreSQL.** En `READ COMMITTED`, el segundo conteo puede aumentar en uno. En `REPEATABLE READ`, el segundo conteo debe ser igual al primero porque A conserva su instantanea inicial; la fila insertada por B no es visible para esa transaccion.
+**Observacion real del motor (REPEATABLE READ):**
 
-**Observacion real del motor: PENDIENTE DE EJECUCION.** Registrar ambos conteos por aislamiento y la confirmacion de cada insercion de B.
+| Momento  | activos |
+|----------|---------|
+| CONTEO_1 | 2       |
+| CONTEO_2 | 2       |
+
+REPEATABLE READ previene la lectura fantasma: A conserva su instantanea inicial y la fila insertada por B no es visible para esa transaccion.
 
 ## 3. Espera por bloqueo
 
@@ -123,23 +155,31 @@ Sesion A, conservar la transaccion abierta despues del `SELECT` mientras se ejec
 
 ```sql
 BEGIN;
-SET LOCAL lock_timeout = '10s';
+SET LOCAL lock_timeout = '15s';
 SELECT id_producto FROM producto WHERE nombre = :'laboratorio_id' || '_BLOQUEO' AND id_categoria = (SELECT id_categoria FROM categoria WHERE descripcion = 'Semilla TP2: ' || :'laboratorio_id') FOR UPDATE;
+SELECT pg_sleep(12);
 COMMIT;
 ```
 
-Sesion B, mientras A conserva el bloqueo:
+Sesion B, mientras A conserva el bloqueo (lock_timeout = 5s):
 
 ```sql
 BEGIN;
-SET LOCAL lock_timeout = '10s';
+SET LOCAL lock_timeout = '5s';
 SELECT id_producto FROM producto WHERE nombre = :'laboratorio_id' || '_BLOQUEO' AND id_categoria = (SELECT id_categoria FROM categoria WHERE descripcion = 'Semilla TP2: ' || :'laboratorio_id') FOR UPDATE;
 COMMIT;
 ```
 
-**Resultado esperado segun PostgreSQL.** Si A libera la fila mediante `COMMIT` o `ROLLBACK` antes de diez segundos, B puede terminar el `SELECT` y confirmar. Si A no la libera, B recibe un error de `lock timeout`; este es un resultado de seguridad controlado. PostgreSQL cancela la sentencia y la transaccion de B queda abortada, por lo que B debe ejecutar `ROLLBACK;` antes de continuar.
+**Observacion real del motor:**
 
-**Observacion real del motor: PENDIENTE DE EJECUCION.** Registrar hora de inicio de B, hora de liberacion o vencimiento, mensaje final de B y, si hubo `lock timeout`, el `ROLLBACK` ejecutado.
+- **Sesion A:** `BEGIN`, `SET`, `id_producto = 6` (1 fila), `pg_sleep` completado, `COMMIT`.
+- **Sesion B:** `BEGIN`, `SET`, luego **ERROR:**
+  ```
+  ERROR: cancelando la sentencia debido a que se agoto el tiempo de espera de "locks"
+  CONTEXTO: mientras se bloqueaba la tupla (0,4) de la relacion «producto»
+  ```
+
+La sesion B intento adquirir el bloqueo `FOR UPDATE` sobre la misma fila que A mantiene abierto. Como el `lock_timeout` de B (5 segundos) se agoto antes de que A liberara la fila (12 segundos), PostgreSQL cancelo la sentencia con el error de lock timeout. La transaccion de B quedo abortada y requirio `ROLLBACK` antes de continuar.
 
 ## Limpieza final (sesion A)
 
@@ -151,11 +191,13 @@ DELETE FROM categoria WHERE descripcion = 'Semilla TP2: ' || :'laboratorio_id';
 COMMIT;
 ```
 
+**Observacion real:** `BEGIN`, `DELETE 0`, `DELETE 3`, `DELETE 1`, `COMMIT`. Limpieza completada.
+
 ## Checklist de evidencia real
 
-- [ ] Usar el mismo `laboratorio_id` unico en ambas sesiones.
-- [ ] Ejecutar preparacion y limpieza final en `food_store_tp2`.
-- [ ] Abrir dos sesiones `psql` independientes.
-- [ ] Reemplazar cada campo **PENDIENTE DE EJECUCION** por salidas o capturas reales.
-- [ ] Conservar comandos, version de PostgreSQL y nivel de aislamiento usado.
-- [ ] No presentar resultados esperados como resultados observados.
+- [x] Usar el mismo `laboratorio_id` unico en ambas sesiones.
+- [x] Ejecutar preparacion y limpieza final en `food_store_tp2`.
+- [x] Abrir dos sesiones `psql` independientes.
+- [x] Reemplazar cada campo **PENDIENTE DE EJECUCION** por salidas o capturas reales.
+- [x] Conservar comandos, version de PostgreSQL y nivel de aislamiento usado.
+- [x] No presentar resultados esperados como resultados observados.
