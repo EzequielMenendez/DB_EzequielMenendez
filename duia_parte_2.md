@@ -33,7 +33,7 @@ COMMIT;
 
 Salida: `BEGIN`, `DELETE 0` x3, `INSERT 0 1` x3, `COMMIT`.
 
-### Escenario 1: Lectura no repetible (READ COMMITTED)
+### Escenario 1: Lectura no repetible
 
 Sesion A:
 ```
@@ -53,8 +53,7 @@ COMMIT;
 
 Resultado observado: **Lectura 1 = 10.00, Lectura 2 = 20.00.** La lectura no repetible se produjo porque READ COMMITTED toma una nueva instantanea por cada sentencia.
 
-### Escenario 1B: Lectura no repetible (REPEATABLE READ)
-
+### Escenario 1B: Lectura no repetible
 Sesion A:
 ```
 BEGIN ISOLATION LEVEL REPEATABLE READ;
@@ -73,7 +72,7 @@ COMMIT;
 
 Resultado observado: **Lectura 1 = 10.00, Lectura 2 = 10.00.** REPEATABLE READ conserva la instantanea inicial de toda la transaccion; la modificacion de B no es visible para A.
 
-### Escenario 2: Lectura fantasma (READ COMMITTED)
+### Escenario 2: Lectura fantasma
 
 Sesion A:
 ```
@@ -95,7 +94,7 @@ COMMIT;
 
 Resultado observado: **Conteo 1 = 2, Conteo 2 = 3.** La insercion de B es visible para A en la segunda lectura bajo READ COMMITTED.
 
-### Escenario 2B: Lectura fantasma (REPEATABLE READ)
+### Escenario 2B: Lectura fantasma
 
 Sesion A:
 ```
@@ -115,7 +114,7 @@ COMMIT;
 
 Resultado observado: **Conteo 1 = 2, Conteo 2 = 2.** REPEATABLE READ previene la lectura fantasma: A conserva su instantanea inicial y la fila insertada por B no es visible.
 
-### Escenario 3: Espera por bloqueo (lock timeout)
+### Escenario 3: Espera por bloqueo
 
 Sesion A (mantiene el bloqueo):
 ```
