@@ -1,11 +1,21 @@
-backups/
-*.backup
-*.dump
-*.sql~
+# Dependencias
+node_modules/
+
+# Variables de entorno (nunca commitear secretos)
+.env
+
+# Backups de base de datos
+db/backups/*.dump
+db/backups/*.sql
+db/backups/*.backup
+
+# Archivos temporales y del editor
+*.log
 *.tmp
 *.swp
 *.swo
 *~
+*.sql~
 .vscode/
 .idea/
 .DS_Store
